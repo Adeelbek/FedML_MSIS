@@ -46,11 +46,13 @@ class YOLOAggregator(ServerAggregator):
     
     def _val(self, test_data, device, args):
         data_dict = None
-        save_dir = Path(args.opt["save_dir"])
+        save_dir = Path(args.save_dir)
+        # save_dir = Path(args.opt["save_dir"])
         model = self.model
         compute_loss = ComputeLoss(model)
-        data_dict = data_dict or check_dataset(args.opt["data"])
-        half, single_cls, plots = False, args.opt["single_cls"], False
+        data_dict = data_dict or check_dataset(args.data_conf) 
+        # data_dict = data_dict or check_dataset(args.opt["data"])
+        half, single_cls, plots = False, False, False
         host_id = int(list(args.client_id_list)[1])
         logging.info(f"\n#########################| Server ID {host_id} performs evaluation |############################\n")
         results, maps, _ = validate.run(data=data_dict,
