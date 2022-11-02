@@ -16,6 +16,7 @@ from model.yolov5.utils.general import (LOGGER, Profile, check_amp,
                                         check_img_size, check_yaml, colorstr,
                                         non_max_suppression, scale_coords,
                                         xywh2xyxy)
+
 from model.yolov5.utils.loggers import Loggers
 from model.yolov5.utils.loss import ComputeLoss
 from model.yolov5.utils.metrics import (ConfusionMatrix, ap_per_class, box_iou,
@@ -34,9 +35,133 @@ from model.yolov5.utils.general import Profile, non_max_suppression, xywh2xyxy, 
 from model.yolov5.utils.metrics import ConfusionMatrix, yolov5_ap_per_class, ap_per_class, box_iou
 from fedml.core.mlops.mlops_profiler_event import  MLOpsProfilerEvent
 from model.yolov5 import val as validate # imported to use original yolov5 validation function!!!
+
 from model.yolov5.utils.loggers import Loggers
-from model.yolov5.utils.general import (LOGGER, check_amp, check_dataset, check_file, check_img_size, check_yaml, colorstr)
- 
+from model.yolov5.utils.loss import ComputeLoss
+from model.yolov5.utils.metrics import (ConfusionMatrix, ap_per_class, box_iou,
+                                        yolov5_ap_per_class)
+from model.yolov5 import \
+    val_pseudos as \
+    pseudos  # imported to use modified yolov5 validation function!!!
+    
+from Yolov5_DeepSORT_PseudoLabels import trackv2_from_file as recover
+from Yolov5_DeepSORT_PseudoLabels.merge_forward_backward_v2 import merge 
+
+
+def modify_dataset(dataloader,new_path):
+       
+    count_missing_file = 0
+    # Replace GT with Pseudos
+    for i, _label_file in enumerate(dataloader.dataset.label_files):
+        
+        # Path for new label file
+        new_label_file = os.path.join ( os.path.realpath(new_path), os.path.basename(_label_file) )
+        
+        # Make file if there are no pseudos for this file
+        if not os.path.isfile(new_label_file): 
+            open(new_label_file, 'w')
+            count_missing_file+=1
+            
+        # Read labels from pseudo file
+        _label_old    = dataloader.dataset.labels[i]
+        _label_pseudo = np.array([x.split() for x in open(new_label_file, 'r').readlines()],dtype='float32')
+        
+        # Replace labels in dataset
+        dataloader.dataset.labels[i] = _label_pseudo
+        
+        # Replace label file address in dataset
+        dataloader.dataset.label_files[i] = new_label_file
+        
+    return dataloader
+
+def pseudo_labels(data,batch_size,imgsz,half,model,single_cls,dataloader,save_dir,plots,compute_loss,args,epoch_no,host_id):
+    """
+    Generate pseudo labels
+    """
+    for conf,thresh in zip ( ['low','high'], [0.001, 0.5]):
+        logging.info(f'Trainer {host_id } generating {conf} confidence labels for epoch {epoch_no}.')
+        results, maps, _ =  pseudos.run(data            = data          ,
+                                        batch_size      = batch_size    ,
+                                        imgsz           = imgsz         ,
+                                        half            = half          ,
+                                        model           = model         ,
+                                        single_cls      = single_cls    ,
+                                        dataloader      = dataloader    ,
+                                        save_dir        = save_dir      ,
+                                        plots           = plots         ,
+                                        compute_loss    = compute_loss  ,
+                                        
+                                        save_txt        = True          ,
+                                        save_conf       = True          ,
+                                        epoch_no        = epoch_no      ,
+                                        host_id         = host_id       ,
+                                        conf_thres      = thresh        ,   
+                                        confidence      = conf                                     
+                                        )
+
+def recover_labels(dataloader,save_dir,epoch_no,host_id):
+    from pathlib import Path            
+    class opt_recovery(object):
+
+        agnostic_nms        = False
+        augment             = False
+        classes             = None
+        config_deepsort     = 'Yolov5_DeepSORT_PseudoLabels/deep_sort/configs/deep_sort.yaml'
+        device              = ''
+        dnn                 = False
+        evaluate            = False
+        fourcc              = 'mp4v'
+        half                = False
+        imgsz               = [640, 640]
+        max_hc_boxes        = 1000
+        name                = 'Recover'
+        project             = Path('runs/track')
+        save_img            = False
+        save_vid            = False
+        show_vid            = False
+        visualize           = False
+        
+        deep_sort_model     = "resnet50_MSMT17"
+        yolo_model          = "best.pt"
+        conf_thres          = 0.5
+        iou_thres           = 0.6
+        save_txt            = True
+        exist_ok            = True
+        reverse             = False
+        
+        source=save_dir / 'labels' 
+        source = source / f'Trainer_{host_id}--epoch_{epoch_no}'
+        source = source / f'low_0.001'
+        # source = source / f'high_0.5'
+        source.mkdir(parents=True, exist_ok=True)
+        source = str(source)
+        output = source
+    
+    # Recover in Forward
+    opt_recovery.output = opt_recovery.source+'-FW'
+    opt_recovery.reverse= False
+    with torch.no_grad():
+        recover.detect(opt_recovery)
+        print(f"\n\n\n")
+
+    # Recover in Backward
+    opt_recovery.output = opt_recovery.source+'-BW'
+    opt_recovery.reverse= True
+    with torch.no_grad():
+        recover.detect(opt_recovery)
+        print(f"\n\n\n")
+
+    # Merge
+    class opt_merge(object):
+        forward     = opt_recovery.source+'-FW'
+        backward    = opt_recovery.source+'-BW'
+        merged      = opt_recovery.source+'-Merged'
+    merge(opt_merge)
+
+    # Replace pseudo labels in dataset
+    modify_dataset(dataloader,opt_merge.merged)
+        
+    return dataloader
 
 def process_batch(detections, labels, iouv):
     """
