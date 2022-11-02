@@ -5,6 +5,11 @@ val: ./BDD/val_2K.txt
 test: ./BDD/test_bdd.txt
 
 
+# path: ../../../../BDD
+# train: ../../../../BDD/train_20K.txt  #hackathon_train.txt   #train_5K.txt
+# val: ../../../../BDD/val_2K.txt
+# test: ../../../../BDD/test_bdd.txt
+
 
 nc: 13
 

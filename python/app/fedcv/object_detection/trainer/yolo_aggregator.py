@@ -2,6 +2,7 @@ import logging
 
 import numpy as np
 import torch
+from pathlib import Path
 
 import fedml
 from model.yolov5.utils.general import (
@@ -12,8 +13,10 @@ from model.yolov5.utils.general import (
 )
 from model.yolov5.utils.loss import ComputeLoss
 from model.yolov5.utils.metrics import ap_per_class
+from model.yolov5 import val as validate
 from fedml.core import ServerAggregator
 from fedml.core.mlops.mlops_profiler_event import MLOpsProfilerEvent
+from model.yolov5.utils.general import (LOGGER, check_amp, check_dataset, check_file, check_img_size, check_yaml, colorstr)
 
 
 class YOLOAggregator(ServerAggregator):
@@ -37,13 +40,52 @@ class YOLOAggregator(ServerAggregator):
         # #except:
         # logging.info(f"\nOOOOOOOOOOOOOOOOOOOO| Aggregator saves aggregated weights {self.args.comm_round}|OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO\n")
     def test(self, test_data, device, args):
-        self._test(test_data=test_data, device=device)
+        #self._test(test_data=test_data, device=device)
+        self._val(test_data, device, args)
         #pass
     
     def _val(self, test_data, device, args):
-        pass
+        data_dict = None
+        save_dir = Path(args.save_dir)
+        # save_dir = Path(args.opt["save_dir"])
+        model = self.model
+        compute_loss = ComputeLoss(model)
+        data_dict = data_dict or check_dataset(args.data_conf) 
+        # data_dict = data_dict or check_dataset(args.opt["data"])
+        half, single_cls, plots = False, False, False
+        host_id = int(list(args.client_id_list)[1])
+        logging.info(f"\n#########################| Server ID {host_id} performs evaluation |############################\n")
+        results, maps, _ = validate.run(data=data_dict,
+                                        batch_size=128,
+                                        imgsz=args.img_size[0],
+                                        half=half,
+                                        model=model,
+                                        single_cls=single_cls,
+                                        dataloader=test_data,
+                                        save_dir=save_dir,
+                                        plots=plots,
+                                        compute_loss=compute_loss
+                                        )
+        #return results, maps
+        
+        MLOpsProfilerEvent.log_to_wandb(
+                {
+                    f"Server_{host_id}_mean_precision": np.float(results[0]),
+                    f"Server_{host_id}_mean_recall": np.float(results[1]),
+                    f"Server_{host_id}_map@50": np.float(results[2]),
+                    f"Server_{host_id}_map": np.float(results[3]),
+                    f"Server_{host_id}_test_box_loss": np.float(results[4]),
+                    f"Server_{host_id}_test_obj_loss": np.float(results[5]),
+                    f"Server_{host_id}_test_cls_loss": np.float(results[6]),
+                    
+                }
+            )
+        logging.info(f"mAPs of all class in a list {maps}")
 
-    def _test(self, test_data, device):
+    def _test(self, test_data, device, args):
+        
+        #results, maps = self._val(test_data, device, args)
+        
         logging.info("Evaluating on Trainer ID: {}".format(self.id))
         model = self.model
         args = self.args
